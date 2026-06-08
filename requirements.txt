@@ -1,0 +1,22 @@
+# Core ML / RL
+torch>=2.0.0
+stable-baselines3>=2.0.0
+gymnasium>=0.29.0
+tensorboard>=2.13.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.11.0
+matplotlib>=3.7.0
+
+# Config / logging
+pyyaml>=6.0
+wandb>=0.15.0  # optional W&B integration
+
+# Dev tools (optional, install via pip install -e ".[dev]")
+# pytest
+# pytest-cov
+# ruff
+# black
+# isort
+# mypy
