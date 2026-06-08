@@ -1,0 +1,50 @@
+# configs/train_ppo.yaml
+# PPO training configuration for RL-FTC quadrotor
+
+environment:
+  sim_dt: 0.01
+  episode_length: 1000
+  max_tilt_deg: 60.0
+  target_position: [0.0, 0.0, 2.0]
+  fault:
+    type: motor_resistance
+    motor_id: 0
+    severity: 0.4
+    start_step: 200
+
+agent:
+  algorithm: PPO
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+
+reward:
+  position_tracking: 1.0
+  attitude_tracking: 0.5
+  velocity_damping: 0.05
+  control_effort: 0.01
+  fault_recovery: 5.0
+  crash_penalty: -50.0
+  recovery_radius: 0.5
+
+curriculum:
+  severity_schedule: [0.0, 0.2, 0.4, 0.6]
+
+training:
+  total_timesteps_per_phase: 200000
+
+ekf:
+  proc_noise_pos: 1.0e-4
+  proc_noise_vel: 1.0e-3
+  proc_noise_kf: 1.0e-5
+  meas_noise_pos: 0.01
+  meas_noise_vel: 0.05
+
+fault_monitor:
+  fault_threshold: 0.85
+  window_size: 20
+  confidence_min: 0.9
