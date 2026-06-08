@@ -1,0 +1,136 @@
+"""
+dynamics.py
+6-DOF quadrotor rigid-body dynamics.
+
+State vector: [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r]
+"""
+
+import numpy as np
+from typing import Dict
+
+
+class QuadrotorDynamics:
+    """
+    Numerical integration of Newton-Euler quadrotor equations.
+
+    Parameters follow a DJI Phantom-class quadrotor.
+    """
+
+    def __init__(self, dt: float = 0.01):
+        self.dt = dt
+
+        # --- Physical parameters ---
+        self.mass = 1.0          # [kg]
+        self.g = 9.81            # [m/s²]
+        self.arm_len = 0.23      # [m]  motor-to-center distance
+        self.max_thrust = 8.0    # [N]  per motor
+
+        # Inertia tensor (diagonal) [kg·m²]
+        self.Ixx = 8.1e-3
+        self.Iyy = 8.1e-3
+        self.Izz = 14.2e-3
+
+        # Thrust / torque coefficients
+        self.kf = 3.16e-10       # thrust coefficient  [N / (rad/s)²]
+        self.km = 7.94e-12       # moment coefficient  [N·m / (rad/s)²]
+
+        self._state: Dict[str, np.ndarray] = {}
+
+    # ------------------------------------------------------------------
+    def reset(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray,
+        euler: np.ndarray,
+        omega: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        self._state = {
+            "position": position.copy(),
+            "velocity": velocity.copy(),
+            "euler": euler.copy(),
+            "omega": omega.copy(),
+        }
+        return self._state
+
+    # ------------------------------------------------------------------
+    def step(self, motor_thrusts: np.ndarray) -> Dict[str, np.ndarray]:
+        """RK4 integration of equations of motion."""
+        s = self._flatten_state()
+        k1 = self._eom(s, motor_thrusts)
+        k2 = self._eom(s + 0.5 * self.dt * k1, motor_thrusts)
+        k3 = self._eom(s + 0.5 * self.dt * k2, motor_thrusts)
+        k4 = self._eom(s + self.dt * k3, motor_thrusts)
+        s_new = s + (self.dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        self._state = self._unflatten_state(s_new)
+        return self._state
+
+    # ------------------------------------------------------------------
+    def mixer(self, total_thrust: float, torques: np.ndarray) -> np.ndarray:
+        """
+        Inverse mixer: maps [thrust, tau_x, tau_y, tau_z] -> 4 motor forces.
+        Motor layout: X-configuration
+            1(CW)  2(CCW)
+            3(CCW) 4(CW)
+        """
+        L = self.arm_len
+        c = self.km / self.kf
+        M = np.array([
+            [1,  1,  1,  1],
+            [0,  L, 0,  -L],
+            [-L,  0,  L,  0],
+            [c, -c,  c, -c],
+        ])
+        b = np.array([total_thrust, torques[0], torques[1], torques[2]])
+        forces = np.linalg.lstsq(M, b, rcond=None)[0]
+        return np.clip(forces, 0.0, self.max_thrust)
+
+    # ------------------------------------------------------------------
+    def _eom(self, s: np.ndarray, f: np.ndarray) -> np.ndarray:
+        """Equations of motion — returns ds/dt."""
+        x, y, z = s[0], s[1], s[2]
+        vx, vy, vz = s[3], s[4], s[5]
+        phi, theta, psi = s[6], s[7], s[8]
+        p, q, r = s[9], s[10], s[11]
+
+        T = np.sum(f)          # total thrust [N]
+
+        # Rotation matrix (ZYX convention)
+        cphi, sphi = np.cos(phi), np.sin(phi)
+        cth, sth = np.cos(theta), np.sin(theta)
+        cpsi, spsi = np.cos(psi), np.sin(psi)
+
+        # Translational accelerations (body -> world)
+        ax = (1/self.mass) * T * (cpsi*sth*cphi + spsi*sphi)
+        ay = (1/self.mass) * T * (spsi*sth*cphi - cpsi*sphi)
+        az = (1/self.mass) * T * (cth*cphi) - self.g
+
+        # Torques from differential thrust
+        L = self.arm_len
+        tau_x = L * (f[1] - f[3])
+        tau_y = L * (f[2] - f[0])
+        tau_z = self.km/self.kf * (f[0] - f[1] + f[2] - f[3])
+
+        # Angular accelerations (Euler equations)
+        dp = (tau_x - (self.Izz - self.Iyy)*q*r) / self.Ixx
+        dq = (tau_y - (self.Ixx - self.Izz)*p*r) / self.Iyy
+        dr = (tau_z - (self.Iyy - self.Ixx)*p*q) / self.Izz
+
+        # Euler angle rates
+        dphi   = p + (q*sphi + r*cphi) * np.tan(theta)
+        dtheta = q*cphi - r*sphi
+        dpsi   = (q*sphi + r*cphi) / (cth + 1e-9)
+
+        return np.array([vx, vy, vz, ax, ay, az, dphi, dtheta, dpsi, dp, dq, dr])
+
+    def _flatten_state(self) -> np.ndarray:
+        s = self._state
+        return np.concatenate([s["position"], s["velocity"], s["euler"], s["omega"]])
+
+    def _unflatten_state(self, s: np.ndarray) -> Dict[str, np.ndarray]:
+        return {
+            "position": s[0:3],
+            "velocity": s[3:6],
+            "euler":    s[6:9],
+            "omega":    s[9:12],
+        }
+
