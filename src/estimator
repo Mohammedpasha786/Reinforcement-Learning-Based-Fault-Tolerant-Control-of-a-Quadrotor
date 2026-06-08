@@ -1,0 +1,200 @@
+"""
+ekf.py
+Extended Kalman Filter for online estimation of motor fault parameters.
+
+State: x = [pos(3), vel(3), euler(3), omega(3), kf_factors(4)]
+         = 16-dimensional augmented state
+
+The kf_factors represent the per-motor thrust efficiency [0,1].
+In nominal operation, kf_factors = [1, 1, 1, 1].
+A fault on motor i causes kf_factors[i] < 1.
+
+Reference: Daigle et al., IEEE Aerospace 2012; Bhan et al., SysTol 2021.
+"""
+
+import numpy as np
+from typing import Tuple, Optional
+
+
+class FaultEKF:
+    """
+    Extended Kalman Filter augmenting system state with fault parameters.
+
+    Args:
+        dt:           Simulation timestep [s]
+        proc_noise_Q: Process noise covariance (16x16)
+        meas_noise_R: Measurement noise covariance (12x12)
+    """
+
+    STATE_DIM = 16   # 12 kinematic + 4 kf_factors
+    MEAS_DIM  = 12   # pos, vel, euler, omega
+
+    def __init__(
+        self,
+        dt: float = 0.01,
+        proc_noise_pos: float = 1e-4,
+        proc_noise_vel: float = 1e-3,
+        proc_noise_euler: float = 1e-4,
+        proc_noise_omega: float = 1e-3,
+        proc_noise_kf: float = 1e-5,
+        meas_noise_pos: float = 0.01,
+        meas_noise_vel: float = 0.05,
+        meas_noise_euler: float = 0.005,
+        meas_noise_omega: float = 0.02,
+    ):
+        self.dt = dt
+        n, m = self.STATE_DIM, self.MEAS_DIM
+
+        # Process noise covariance Q
+        q_diag = np.concatenate([
+            np.full(3, proc_noise_pos),
+            np.full(3, proc_noise_vel),
+            np.full(3, proc_noise_euler),
+            np.full(3, proc_noise_omega),
+            np.full(4, proc_noise_kf),
+        ])
+        self.Q = np.diag(q_diag)
+
+        # Measurement noise covariance R
+        r_diag = np.concatenate([
+            np.full(3, meas_noise_pos),
+            np.full(3, meas_noise_vel),
+            np.full(3, meas_noise_euler),
+            np.full(3, meas_noise_omega),
+        ])
+        self.R = np.diag(r_diag)
+
+        # Initial state and covariance
+        self.x = np.zeros(n)
+        self.x[12:] = 1.0          # nominal kf_factors = [1,1,1,1]
+        self.P = np.eye(n) * 0.1
+
+        # Measurement matrix H (linear observation of kinematic states)
+        self.H = np.zeros((m, n))
+        self.H[:m, :m] = np.eye(m)
+
+    # ------------------------------------------------------------------
+    def predict(self, motor_thrusts: np.ndarray) -> None:
+        """EKF prediction step using nonlinear dynamics model."""
+        x = self.x.copy()
+        F = self._jacobian_f(x, motor_thrusts)
+
+        # Propagate state
+        self.x = self._f(x, motor_thrusts)
+
+        # Propagate covariance
+        self.P = F @ self.P @ F.T + self.Q
+
+    # ------------------------------------------------------------------
+    def update(self, measurement: np.ndarray) -> None:
+        """EKF update step given sensor measurement."""
+        z = measurement
+        H = self.H
+        S = H @ self.P @ H.T + self.R
+
+        # Kalman gain
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        # State update
+        y = z - H @ self.x       # innovation
+        self.x = self.x + K @ y
+
+        # Covariance update (Joseph form for numerical stability)
+        I_KH = np.eye(self.STATE_DIM) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
+
+        # Clamp kf_factors to physical bounds [0, 1]
+        self.x[12:] = np.clip(self.x[12:], 0.0, 1.0)
+
+    # ------------------------------------------------------------------
+    def get_fault_params(self) -> np.ndarray:
+        """Return estimated per-motor kf_factors."""
+        return self.x[12:16].copy()
+
+    def get_kinematic_state(self) -> np.ndarray:
+        """Return estimated kinematic state (12-dim)."""
+        return self.x[:12].copy()
+
+    def get_covariance_trace(self) -> float:
+        """Trace of covariance matrix — measure of estimation uncertainty."""
+        return float(np.trace(self.P))
+
+    # ------------------------------------------------------------------
+    def _f(self, x: np.ndarray, f_motors: np.ndarray) -> np.ndarray:
+        """
+        Nonlinear process model.
+        kf_factors evolve as a random walk (fault assumed quasi-static).
+        """
+        pos   = x[0:3]
+        vel   = x[3:6]
+        euler = x[6:9]
+        omega = x[9:12]
+        kf    = x[12:16]
+
+        phi, theta, psi = euler
+        p, q, r = omega
+
+        # Apply fault model: scale motor thrusts by estimated kf_factors
+        f_eff = f_motors * kf
+        T = np.sum(f_eff)
+
+        g = 9.81
+        m = 1.0       # nominal mass [kg]
+
+        # Translational dynamics
+        cphi, sphi = np.cos(phi), np.sin(phi)
+        cth,  sth  = np.cos(theta), np.sin(theta)
+        cpsi, spsi = np.cos(psi), np.sin(psi)
+
+        ax = (T/m) * (cpsi*sth*cphi + spsi*sphi)
+        ay = (T/m) * (spsi*sth*cphi - cpsi*sphi)
+        az = (T/m) * (cth*cphi) - g
+
+        # Rotational dynamics (simplified — decoupled)
+        L    = 0.23       # arm length
+        Ixx  = 8.1e-3
+        Iyy  = 8.1e-3
+        Izz  = 14.2e-3
+        km_kf = 7.94e-12 / 3.16e-10
+
+        tau_x = L * (f_eff[1] - f_eff[3])
+        tau_y = L * (f_eff[2] - f_eff[0])
+        tau_z = km_kf * (f_eff[0] - f_eff[1] + f_eff[2] - f_eff[3])
+
+        dp = (tau_x - (Izz - Iyy)*q*r) / Ixx
+        dq = (tau_y - (Ixx - Izz)*p*r) / Iyy
+        dr = (tau_z - (Iyy - Ixx)*p*q) / Izz
+
+        dphi   = p + (q*sphi + r*cphi) * np.tan(theta)
+        dtheta = q*cphi - r*sphi
+        dpsi   = (q*sphi + r*cphi) / (cth + 1e-9)
+
+        x_new = np.concatenate([
+            pos + self.dt * vel,
+            vel + self.dt * np.array([ax, ay, az]),
+            euler + self.dt * np.array([dphi, dtheta, dpsi]),
+            omega + self.dt * np.array([dp, dq, dr]),
+            kf,       # kf_factors treated as constants (random walk)
+        ])
+        return x_new
+
+    def _jacobian_f(self, x: np.ndarray, f_motors: np.ndarray) -> np.ndarray:
+        """Numerical Jacobian via finite differences."""
+        eps = 1e-5
+        n = self.STATE_DIM
+        F = np.zeros((n, n))
+        f0 = self._f(x, f_motors)
+        for i in range(n):
+            x_p = x.copy()
+            x_p[i] += eps
+            F[:, i] = (self._f(x_p, f_motors) - f0) / eps
+        return F
+
+    def reset(self, initial_pos: Optional[np.ndarray] = None) -> None:
+        """Reset EKF to nominal state."""
+        self.x = np.zeros(self.STATE_DIM)
+        self.x[12:] = 1.0
+        if initial_pos is not None:
+            self.x[:3] = initial_pos
+        self.P = np.eye(self.STATE_DIM) * 0.1
+
