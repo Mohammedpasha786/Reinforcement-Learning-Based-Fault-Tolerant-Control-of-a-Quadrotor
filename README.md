@@ -1,12 +1,5 @@
 #  RL-Based Fault-Tolerant Control of a Quadrotor
-
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)](https://pytorch.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/yourusername/rl-ftc-quadrotor/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/rl-ftc-quadrotor/actions)
-[![Docs](https://img.shields.io/badge/docs-passing-brightgreen)](docs/)
-
- A model-based Reinforcement Learning framework for fault-tolerant PID gain tuning on quadrotor UAVs — detecting faults via Extended Kalman Filter and recovering via adaptive RL policy.
+A model-based Reinforcement Learning framework for fault-tolerant PID gain tuning on quadrotor UAVs — detecting faults via Extended Kalman Filter and recovering via adaptive RL policy.
 
 ## Overview
 
